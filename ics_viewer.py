@@ -10,6 +10,9 @@ import re
 import locale
 import zlib
 import calendar
+import json
+import zipfile
+from xml.sax.saxutils import escape as xml_escape
 import webbrowser
 from datetime import datetime, date, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -21,7 +24,7 @@ from tkinter import ttk, filedialog, messagebox
 from dateutil.rrule import rrulestr, rruleset
 
 APP_NAME = "ICS Viewer"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 AUTHOR = "Raffaele D'Elia"
 AUTHOR_URL = "https://raffaeledelia.com"
 COPYRIGHT = "Copyright © 2026 Raffaele D'Elia"
@@ -39,6 +42,11 @@ STRINGS = {
         "when": "When", "location": "Location", "description": "Description",
         "organizer": "Organizer", "attendees": "Attendees", "url": "Link",
         "status": "Status", "recurring": "Recurring event", "close": "Close", "about": "About",
+        "language": "Language:", "lang_auto": "Automatic", "export": "Export .xlsx",
+        "export_done": "Exported {n} events to:\n{path}", "nothing_to_export": "There are no events to export.",
+        "error_write": "Could not save the file:\n{e}", "sheet": "Events", "yes": "Yes", "no": "No",
+        "xlsx_cols": ["Start date", "Start time", "End date", "End time", "All day", "Title", "Location",
+                      "Description", "Organizer", "Attendees", "Status", "Recurring", "Link"],
         "about_text": "A simple viewer for iCalendar (.ics) files.", "version": "Version", "author": "Author",
         "error": "Error", "error_read": "Could not read the file:\n{e}",
         "cal_files": "Calendar files", "all_files": "All files",
@@ -60,6 +68,11 @@ STRINGS = {
         "when": "Quando", "location": "Luogo", "description": "Descrizione",
         "organizer": "Organizzatore", "attendees": "Partecipanti", "url": "Link",
         "status": "Stato", "recurring": "Evento ricorrente", "close": "Chiudi", "about": "Informazioni",
+        "language": "Lingua:", "lang_auto": "Automatica", "export": "Esporta .xlsx",
+        "export_done": "Esportati {n} eventi in:\n{path}", "nothing_to_export": "Non ci sono eventi da esportare.",
+        "error_write": "Impossibile salvare il file:\n{e}", "sheet": "Eventi", "yes": "Sì", "no": "No",
+        "xlsx_cols": ["Data inizio", "Ora inizio", "Data fine", "Ora fine", "Tutto il giorno", "Titolo", "Luogo",
+                      "Descrizione", "Organizzatore", "Partecipanti", "Stato", "Ricorrente", "Link"],
         "about_text": "Un semplice visualizzatore di file iCalendar (.ics).", "version": "Versione", "author": "Autore",
         "error": "Errore", "error_read": "Impossibile leggere il file:\n{e}",
         "cal_files": "File calendario", "all_files": "Tutti i file",
@@ -76,10 +89,30 @@ STRINGS = {
 }
 
 
-def detect_language():
-    forced = os.environ.get("ICSVIEWER_LANG", "").lower()[:2]
-    if forced in STRINGS:
-        return forced
+LANGUAGE_NAMES = {"en": "English", "it": "Italiano"}
+SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
+                             "ICSViewer", "settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except OSError:
+        pass
+
+
+def system_language():
     if sys.platform == "win32":
         try:
             import ctypes
@@ -93,8 +126,24 @@ def detect_language():
     return "en"
 
 
+def detect_language():
+    """ICSVIEWER_LANG env var > language chosen in the app > Windows display language."""
+    forced = os.environ.get("ICSVIEWER_LANG", "").lower()[:2]
+    if forced in STRINGS:
+        return forced
+    chosen = load_settings().get("language", "auto")
+    return chosen if chosen in STRINGS else system_language()
+
+
 LANG = detect_language()
-T = STRINGS[LANG]
+T = dict(STRINGS[LANG])  # updated in place by set_language()
+
+
+def set_language(lang):
+    global LANG
+    LANG = lang if lang in STRINGS else system_language()
+    T.clear()
+    T.update(STRINGS[LANG])
 
 
 def fmt_date_short(d):
@@ -477,6 +526,107 @@ def load_ics_file(path):
 
 
 # --------------------------------------------------------------------------
+# Minimal .xlsx writer (no external dependencies)
+# --------------------------------------------------------------------------
+
+_XML_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_EXCEL_EPOCH = date(1899, 12, 30)
+_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+
+
+def _col_letter(i):
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _xlsx_cell(ref, v, header=False):
+    """Styles: 1 = bold header, 2 = date, 3 = time."""
+    if v is None or v == "":
+        return ""
+    if header or isinstance(v, str):
+        text = xml_escape(_XML_BAD.sub("", str(v))[:32000])
+        st = ' s="1"' if header else ""
+        return f'<c r="{ref}" t="inlineStr"{st}><is><t xml:space="preserve">{text}</t></is></c>'
+    if isinstance(v, datetime):
+        v = v.date()
+    if isinstance(v, date):
+        return f'<c r="{ref}" s="2"><v>{(v - _EXCEL_EPOCH).days}</v></c>'
+    if isinstance(v, time):
+        return f'<c r="{ref}" s="3"><v>{(v.hour * 3600 + v.minute * 60 + v.second) / 86400!r}</v></c>'
+    return f'<c r="{ref}"><v>{v}</v></c>'
+
+
+def write_xlsx(path, sheet_name, headers, rows, widths):
+    """Write a single-sheet workbook. Row values: str, int/float, date, time or None."""
+    xml_rows = []
+    for r, values in enumerate([headers] + rows, start=1):
+        cells = "".join(_xlsx_cell(f"{_col_letter(c)}{r}", v, r == 1) for c, v in enumerate(values))
+        xml_rows.append(f'<row r="{r}">{cells}</row>')
+    last_col = _col_letter(len(headers) - 1)
+    last_row = len(rows) + 1
+    cols = "".join(f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>'
+                   for i, w in enumerate(widths))
+    sheet = (f'{_XML_HEAD}<worksheet xmlns="{_NS_MAIN}">'
+             '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" '
+             'activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+             f'<cols>{cols}</cols><sheetData>{"".join(xml_rows)}</sheetData>'
+             f'<autoFilter ref="A1:{last_col}{last_row}"/></worksheet>')
+    styles = (f'{_XML_HEAD}<styleSheet xmlns="{_NS_MAIN}">'
+              '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+              '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+              '<fills count="2"><fill><patternFill patternType="none"/></fill>'
+              '<fill><patternFill patternType="gray125"/></fill></fills>'
+              '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+              '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+              '<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+              '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+              '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+              '<xf numFmtId="20" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+              '</cellXfs></styleSheet>')
+    name = re.sub(r"[\\/?*\[\]:']", "", sheet_name)[:31] or "Sheet1"
+    workbook = (f'{_XML_HEAD}<workbook xmlns="{_NS_MAIN}" xmlns:r="{_NS_REL}">'
+                f'<sheets><sheet name="{xml_escape(name)}" sheetId="1" r:id="rId1"/></sheets>'
+                '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'
+                f"'{xml_escape(name)}'!$A$1:${last_col}${last_row}</definedName></definedNames>"
+                '</workbook>')
+    ct = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+    files = {
+        "[Content_Types].xml":
+            f'{_XML_HEAD}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.sheet.main+xml"/>'
+            f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{ct}.worksheet+xml"/>'
+            f'<Override PartName="/xl/styles.xml" ContentType="{ct}.styles+xml"/>'
+            '</Types>',
+        "_rels/.rels":
+            f'{_XML_HEAD}<Relationships xmlns="{_NS_PKG}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL}/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>',
+        "xl/_rels/workbook.xml.rels":
+            f'{_XML_HEAD}<Relationships xmlns="{_NS_PKG}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL}/worksheet" Target="worksheets/sheet1.xml"/>'
+            f'<Relationship Id="rId2" Type="{_NS_REL}/styles" Target="styles.xml"/>'
+            '</Relationships>',
+        "xl/workbook.xml": workbook,
+        "xl/styles.xml": styles,
+        "xl/worksheets/sheet1.xml": sheet,
+    }
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, data in files.items():
+            z.writestr(n, data.encode("utf-8"))
+    os.replace(tmp, path)
+
+
+# --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
 
@@ -521,18 +671,11 @@ class App(tk.Tk):
         style.configure("Treeview", font=("Segoe UI", 9), rowheight=int(self.font.metrics("linespace") * 1.45))
         style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
-        self._build_toolbar()
-        self.body = tk.Frame(self, bg=BG)
-        self.body.pack(fill="both", expand=True)
-        self.cal_frame = tk.Frame(self.body, bg=BG)
-        self.list_frame = ttk.Frame(self.body)
-        self._build_list()
-        self.status = ttk.Label(self, text=T["no_file"], anchor="w", padding=(8, 3))
-        self.status.pack(fill="x", side="bottom")
-
-        self.cal_frame.bind("<Configure>", self._on_cal_resize)
+        self.search_var.trace_add("write", lambda *a: self.render_list())
+        self._build_ui()
         self.bind_all("<MouseWheel>", self._on_wheel)
         self.bind("<Control-o>", lambda e: self.open_dialog())
+        self.bind("<Control-e>", lambda e: self.export_xlsx())
         self.bind("<F1>", lambda e: self.show_about())
         self.bind("<Prior>", lambda e: self.shift_month(-1))
         self.bind("<Next>", lambda e: self.shift_month(1))
@@ -542,12 +685,49 @@ class App(tk.Tk):
         if path:
             self.after(50, lambda: self.load(path))
 
+    def _build_ui(self):
+        self._build_toolbar()
+        self.body = tk.Frame(self, bg=BG)
+        self.body.pack(fill="both", expand=True)
+        self.cal_frame = tk.Frame(self.body, bg=BG)
+        self.list_frame = ttk.Frame(self.body)
+        self._build_list()
+        self.status = ttk.Label(self, text=T["no_file"], anchor="w", padding=(8, 3))
+        self.status.pack(fill="x", side="bottom")
+        self.cal_frame.bind("<Configure>", self._on_cal_resize)
+
+    def change_language(self, _event=None):
+        codes = ["auto"] + list(LANGUAGE_NAMES)
+        idx = self.lang_combo.current()
+        choice = codes[idx] if 0 <= idx < len(codes) else "auto"
+        settings = load_settings()
+        settings["language"] = choice
+        save_settings(settings)
+        set_language(choice)
+        for w in self.winfo_children():
+            w.destroy()
+        self._build_ui()
+        if self.path:
+            self.load(self.path, keep_month=True)
+        else:
+            self.title(APP_NAME)
+        self.show_view()
+
     # ---- toolbar -------------------------------------------------------
     def _build_toolbar(self):
         bar = ttk.Frame(self, padding=(8, 6))
         bar.pack(fill="x")
         ttk.Button(bar, text=T["open"], command=self.open_dialog).pack(side="left")
+        ttk.Button(bar, text=T["export"], command=self.export_xlsx).pack(side="left", padx=(4, 0))
         ttk.Button(bar, text=T["about"], command=self.show_about).pack(side="right")
+        codes = ["auto"] + list(LANGUAGE_NAMES)
+        chosen = load_settings().get("language", "auto")
+        self.lang_combo = ttk.Combobox(bar, state="readonly", width=11,
+                                       values=[T["lang_auto"]] + list(LANGUAGE_NAMES.values()))
+        self.lang_combo.current(codes.index(chosen) if chosen in codes else 0)
+        self.lang_combo.pack(side="right", padx=(0, 10))
+        self.lang_combo.bind("<<ComboboxSelected>>", self.change_language)
+        ttk.Label(bar, text=T["language"]).pack(side="right", padx=(0, 4))
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
         for key, text in (("cal", T["calendar"]), ("list", T["list"])):
             ttk.Radiobutton(bar, text=text, value=key, variable=self.view, style="Toolbutton",
@@ -567,7 +747,6 @@ class App(tk.Tk):
         entry.pack(side="left", padx=4)
         ttk.Checkbutton(self.search_box, text=T["hide_past"], variable=self.hide_past,
                         command=self.render_list).pack(side="left", padx=8)
-        self.search_var.trace_add("write", lambda *a: self.render_list())
 
     # ---- list view -----------------------------------------------------
     def _build_list(self):
@@ -595,23 +774,35 @@ class App(tk.Tk):
         if sel and sel[0] in self.tree_items:
             self.show_details(self.tree_items[sel[0]])
 
-    def render_list(self):
-        self.tree.delete(*self.tree.get_children())
-        self.tree_items = {}
+    @staticmethod
+    def _is_past(o, now):
+        return o.end_dt() <= now if o.end_dt() > o.start_dt() else o.start_dt() < now
+
+    def list_filtered(self):
+        """Occurrences matching the list view's search box and 'hide past' option."""
         q = self.search_var.get().strip().casefold()
         now = datetime.now()
-        today = now.date()
-        first_upcoming = None
-        prev_day = None
-        shown = 0
+        out = []
         for o in self.occs:
-            past = o.end_dt() <= now if o.end_dt() > o.start_dt() else o.start_dt() < now
-            if self.hide_past.get() and past:
+            if self.hide_past.get() and self._is_past(o, now):
                 continue
             if q:
                 hay = " ".join((o.info["summary"], o.info["location"], o.info["description"])).casefold()
                 if q not in hay:
                     continue
+            out.append(o)
+        return out
+
+    def render_list(self):
+        self.tree.delete(*self.tree.get_children())
+        self.tree_items = {}
+        now = datetime.now()
+        today = now.date()
+        first_upcoming = None
+        prev_day = None
+        shown = 0
+        for o in self.list_filtered():
+            past = self._is_past(o, now)
             d = o.start_dt().date()
             if o.all_day:
                 last = o.end - timedelta(days=1)
@@ -837,7 +1028,40 @@ class App(tk.Tk):
         if path:
             self.load(path)
 
-    def load(self, path):
+    def export_xlsx(self):
+        # The list view exports what it shows (search / hide-past filters); the calendar exports everything.
+        occs = self.list_filtered() if self.view.get() == "list" else self.occs
+        if not occs:
+            messagebox.showinfo(APP_NAME, T["nothing_to_export"], parent=self)
+            return
+        base = os.path.splitext(os.path.basename(self.path))[0] if self.path else "calendar"
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".xlsx",
+                                            initialfile=base + ".xlsx",
+                                            filetypes=[("Excel", "*.xlsx"), (T["all_files"], "*.*")])
+        if not path:
+            return
+        yes_no = {True: T["yes"], False: T["no"]}
+        rows = []
+        for o in occs:
+            i = o.info
+            if o.all_day:
+                start_d, start_t = o.start, None
+                end_d, end_t = max(o.end - timedelta(days=1), o.start), None
+            else:
+                start_d, start_t = o.start.date(), o.start.time()
+                end_d, end_t = o.end.date(), o.end.time()
+            rows.append([start_d, start_t, end_d, end_t, yes_no[o.all_day], i["summary"],
+                         i["location"], i["description"], i["organizer"], "; ".join(i["attendees"]),
+                         i["status"].capitalize(), yes_no[bool(i["recurring"])], i["url"]])
+        try:
+            write_xlsx(path, T["sheet"], T["xlsx_cols"], rows,
+                       [12, 10, 12, 10, 10, 40, 30, 60, 25, 40, 12, 11, 40])
+        except Exception as e:  # noqa: BLE001 - show any failure to the user
+            messagebox.showerror(T["error"], T["error_write"].format(e=e), parent=self)
+            return
+        messagebox.showinfo(APP_NAME, T["export_done"].format(n=len(rows), path=path), parent=self)
+
+    def load(self, path, keep_month=False):
         try:
             calname, occs = load_ics_file(path)
         except Exception as e:  # noqa: BLE001 - show any failure to the user
@@ -853,7 +1077,9 @@ class App(tk.Tk):
         self.status.config(text=f"{os.path.basename(path)}   ·   {calname + '   ·   ' if calname else ''}{status}")
         # jump to the month with the next upcoming event (or the last one)
         today = date.today()
-        if occs and not any(d.year == today.year and d.month == today.month for d in self.by_day):
+        if keep_month:
+            pass
+        elif occs and not any(d.year == today.year and d.month == today.month for d in self.by_day):
             nxt = next((o for o in occs if o.start_dt().date() >= today), occs[-1])
             d = nxt.start_dt().date()
             self.year, self.month = d.year, d.month

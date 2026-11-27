@@ -5,8 +5,13 @@ A simple Windows viewer for iCalendar (`.ics`) files, with two views:
 - **Calendar**: month grid; click an event for details or a day to see all its events.
 - **List**: compact, searchable list that scrolls to the next upcoming event.
 
-The interface is in **Italian** or **English**, picked automatically from the Windows display language
-(set `ICSVIEWER_LANG=it` or `en` to force one).
+The interface is in **Italian** or **English**. By default it follows the Windows display language;
+pick a language from the **Language** menu in the toolbar to override it (the choice is remembered in
+`%APPDATA%\ICSViewer\settings.json`).
+
+**Export .xlsx** (Ctrl+E) saves the events to an Excel workbook, with real date/time cells, a frozen
+header row and filters. In the list view it exports what the list shows (search and "hide past events"
+filters applied); in the calendar view it exports every event.
 
 Supports time zones (IANA and Windows/Outlook names), all-day and multi-day events,
 recurring events (RRULE, RDATE, EXDATE) and moved occurrences (RECURRENCE-ID).
