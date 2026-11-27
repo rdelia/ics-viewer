@@ -1,0 +1,65 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//ICS Viewer//Sample//EN
+X-WR-CALNAME:Calendario di prova
+BEGIN:VTIMEZONE
+TZID:Europe/Rome
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:meet-1@example.com
+DTSTART;TZID=Europe/Rome:20261127T093000
+DTEND;TZID=Europe/Rome:20261127T110000
+SUMMARY:Riunione di progetto
+LOCATION:Sala riunioni\, piano 2
+DESCRIPTION:Ordine del giorno:\n1. Stato avanzamento\n2. Prossimi passi\, s
+ cadenze e budget
+ORGANIZER;CN="Mario Rossi":mailto:mario@example.com
+ATTENDEE;CN=Giulia Bianchi:mailto:giulia@example.com
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+BEGIN:VEVENT
+UID:utc-call@example.com
+DTSTART:20261130T150000Z
+DURATION:PT45M
+SUMMARY:Call with US team
+URL:https://example.com/meet
+END:VEVENT
+BEGIN:VEVENT
+UID:holiday@example.com
+DTSTART;VALUE=DATE:20261224
+DTEND;VALUE=DATE:20261227
+SUMMARY:Vacanze di Natale
+END:VEVENT
+BEGIN:VEVENT
+UID:weekly@example.com
+DTSTART;TZID=W. Europe Standard Time:20261102T080000
+DTEND;TZID=W. Europe Standard Time:20261102T083000
+RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261228T070000Z
+EXDATE;TZID=W. Europe Standard Time:20261116T080000
+SUMMARY:Stand-up settimanale
+END:VEVENT
+BEGIN:VEVENT
+UID:weekly@example.com
+RECURRENCE-ID;TZID=W. Europe Standard Time:20261123T080000
+DTSTART;TZID=W. Europe Standard Time:20261123T100000
+DTEND;TZID=W. Europe Standard Time:20261123T103000
+SUMMARY:Stand-up settimanale (spostato)
+END:VEVENT
+BEGIN:VEVENT
+UID:bday@example.com
+DTSTART;VALUE=DATE:20260315
+RRULE:FREQ=YEARLY
+SUMMARY:Compleanno di Anna
+END:VEVENT
+BEGIN:VEVENT
+UID:night@example.com
+DTSTART;TZID=/mozilla.org/20050126_1/Europe/Rome:20261205T220000
+DTEND;TZID=/mozilla.org/20050126_1/Europe/Rome:20261206T020000
+SUMMARY:Concerto
+LOCATION:Teatro
+END:VEVENT
+END:VCALENDAR
